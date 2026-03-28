@@ -45,9 +45,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
 
         queueObserver = queueState.$workspaces
+            .combineLatest(workspaceState.$workspaces)
             .receive(on: RunLoop.main)
-            .sink { [weak self] workspaces in
-                self?.updateBadge(count: workspaces.count)
+            .sink { [weak self] queue, wsMap in
+                let needsAttention = wsMap.values.contains { $0.agentStatus == "needsAttention" }
+                self?.updateBadge(count: queue.count, needsAttention: needsAttention)
             }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -67,15 +69,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         )
     }
 
-    func updateBadge(count: Int) {
+    func updateBadge(count: Int, needsAttention: Bool = false) {
         guard let button = statusItem.button else { return }
+
+        let symbolName: String
         if count == 0 {
-            button.image = NSImage(systemSymbolName: "tray", accessibilityDescription: "AeroQueue")
+            symbolName = "tray"
             button.title = ""
         } else {
-            button.image = NSImage(systemSymbolName: "tray.full.fill", accessibilityDescription: "AeroQueue")
+            symbolName = "tray.full.fill"
             button.title = " \(count)"
         }
+
+        var image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "AeroQueue")
+        if needsAttention {
+            let config = NSImage.SymbolConfiguration(paletteColors: [.systemOrange])
+            image = image?.withSymbolConfiguration(config)
+        } else if count > 0 {
+            let config = NSImage.SymbolConfiguration(paletteColors: [.systemBlue])
+            image = image?.withSymbolConfiguration(config)
+        }
+        button.image = image
     }
 
     @objc func togglePopover() {
