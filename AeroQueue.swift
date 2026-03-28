@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 // MARK: - App Entry Point
 
@@ -17,12 +18,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
     var queueState: QueueState!
+    private var queueObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         let dir = "\(NSHomeDirectory())/workspace/aerospace-queue"
         queueState = QueueState(queuePath: "\(dir)/queue.txt")
+
+        queueObserver = queueState.$workspaces
+            .receive(on: RunLoop.main)
+            .sink { [weak self] workspaces in
+                self?.updateBadge(count: workspaces.count)
+            }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -37,6 +45,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.delegate = self
         popover.contentViewController = NSHostingController(rootView: PopoverView(queueState: queueState))
+    }
+
+    func updateBadge(count: Int) {
+        guard let button = statusItem.button else { return }
+        if count == 0 {
+            button.image = NSImage(systemSymbolName: "tray", accessibilityDescription: "AeroQueue")
+            button.title = ""
+        } else {
+            button.image = NSImage(systemSymbolName: "tray.full.fill", accessibilityDescription: "AeroQueue")
+            button.title = " \(count)"
+        }
     }
 
     @objc func togglePopover() {
