@@ -19,7 +19,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var popover: NSPopover!
     var queueState: QueueState!
     var workspaceState: WorkspaceState!
+    var eventLog: EventLog!
     private var queueObserver: AnyCancellable?
+    private var eventObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -27,6 +29,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let dir = "\(NSHomeDirectory())/workspace/aerospace-queue"
         queueState = QueueState(queuePath: "\(dir)/queue.txt")
         workspaceState = WorkspaceState()
+        eventLog = EventLog(eventsPath: "\(dir)/events.jsonl")
+
+        eventObserver = eventLog.$events
+            .receive(on: RunLoop.main)
+            .sink { [weak self] events in
+                guard let self else { return }
+                var seen = Set<String>()
+                for event in events {
+                    if event.type == "status", !seen.contains(event.workspace), let state = event.state {
+                        self.workspaceState.updateAgentStatus(workspace: event.workspace, status: state)
+                        seen.insert(event.workspace)
+                    }
+                }
+            }
 
         queueObserver = queueState.$workspaces
             .receive(on: RunLoop.main)
@@ -47,7 +63,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.delegate = self
         popover.contentViewController = NSHostingController(
-            rootView: PopoverView(queueState: queueState, workspaceState: workspaceState)
+            rootView: PopoverView(queueState: queueState, workspaceState: workspaceState, eventLog: eventLog)
         )
     }
 
@@ -210,11 +226,109 @@ class WorkspaceState: ObservableObject {
     }
 }
 
+// MARK: - Event Log
+
+struct AeroEvent: Identifiable {
+    let id = UUID()
+    let type: String
+    let workspace: String
+    let state: String?
+    let timestamp: Date
+}
+
+@MainActor
+class EventLog: ObservableObject {
+    @Published var events: [AeroEvent] = []
+
+    private let eventsPath: String
+    private var fileDescriptor: Int32 = -1
+    private var dispatchSource: DispatchSourceFileSystemObject?
+    private var lastOffset: UInt64 = 0
+
+    init(eventsPath: String) {
+        self.eventsPath = eventsPath
+        readNewEvents()
+        startWatching()
+    }
+
+    func readNewEvents() {
+        guard let handle = FileHandle(forReadingAtPath: eventsPath) else { return }
+        defer { handle.closeFile() }
+
+        handle.seek(toFileOffset: lastOffset)
+        let data = handle.readDataToEndOfFile()
+        lastOffset = handle.offsetInFile
+
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+
+        for line in text.components(separatedBy: "\n") where !line.isEmpty {
+            guard let jsonData = line.data(using: .utf8),
+                  let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let type = dict["type"] as? String,
+                  let workspace = dict["workspace"] as? String,
+                  let ts = dict["timestamp"] as? TimeInterval else { continue }
+
+            let event = AeroEvent(
+                type: type,
+                workspace: workspace,
+                state: dict["state"] as? String,
+                timestamp: Date(timeIntervalSince1970: ts)
+            )
+            events.insert(event, at: 0)
+        }
+
+        if events.count > 50 {
+            events = Array(events.prefix(50))
+        }
+    }
+
+    private func startWatching() {
+        if !FileManager.default.fileExists(atPath: eventsPath) {
+            FileManager.default.createFile(atPath: eventsPath, contents: nil)
+        }
+
+        fileDescriptor = open(eventsPath, O_EVTONLY)
+        guard fileDescriptor >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fileDescriptor,
+            eventMask: [.write, .delete, .rename],
+            queue: .main
+        )
+
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                let flags = source.data
+                if flags.contains(.delete) || flags.contains(.rename) {
+                    source.cancel()
+                    close(self.fileDescriptor)
+                    self.lastOffset = 0
+                    self.readNewEvents()
+                    self.startWatching()
+                } else {
+                    self.readNewEvents()
+                }
+            }
+        }
+
+        source.setCancelHandler { [weak self] in
+            if let fd = self?.fileDescriptor, fd >= 0 {
+                close(fd)
+            }
+        }
+
+        source.resume()
+        dispatchSource = source
+    }
+}
+
 // MARK: - Main Popover View
 
 struct PopoverView: View {
     @ObservedObject var queueState: QueueState
     @ObservedObject var workspaceState: WorkspaceState
+    @ObservedObject var eventLog: EventLog
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -222,10 +336,7 @@ struct PopoverView: View {
             Divider()
             WorkspaceGrid(workspaces: workspaceState.workspaces, focused: workspaceState.focused)
             Divider()
-            Text("Activity timeline coming next.")
-                .foregroundColor(.secondary)
-                .font(.caption)
-                .padding()
+            ActivityTimeline(events: eventLog.events)
             Spacer()
         }
         .frame(width: 320, height: 400)
@@ -349,6 +460,90 @@ struct LegendDot: View {
         HStack(spacing: 3) {
             Circle().fill(color).frame(width: 6, height: 6)
             Text(label)
+        }
+    }
+}
+
+// MARK: - Activity Timeline
+
+struct ActivityTimeline: View {
+    let events: [AeroEvent]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("RECENT ACTIVITY")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            if events.isEmpty {
+                Text("No activity yet")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(events.prefix(10)) { event in
+                            EventRow(event: event)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+    }
+}
+
+struct EventRow: View {
+    let event: AeroEvent
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    var indicatorColor: Color {
+        switch event.type {
+        case "push": return .blue
+        case "pop": return .purple
+        case "status":
+            switch event.state {
+            case "needsAttention": return .orange
+            case "idle", "stopped": return .green
+            default: return .gray
+            }
+        default: return .gray
+        }
+    }
+
+    var description: String {
+        switch event.type {
+        case "push": return "pushed to queue"
+        case "pop": return "popped & switched"
+        case "status":
+            switch event.state {
+            case "needsAttention": return "needs attention"
+            case "idle": return "agent idle"
+            case "stopped": return "agent stopped"
+            default: return event.state ?? "unknown"
+            }
+        default: return event.type
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(Self.timeFormatter.string(from: event.timestamp))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+            Circle()
+                .fill(indicatorColor)
+                .frame(width: 6, height: 6)
+            Text(event.workspace)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+            Text(description)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
         }
     }
 }
