@@ -18,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
     var queueState: QueueState!
+    var workspaceState: WorkspaceState!
     private var queueObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -25,6 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         let dir = "\(NSHomeDirectory())/workspace/aerospace-queue"
         queueState = QueueState(queuePath: "\(dir)/queue.txt")
+        workspaceState = WorkspaceState()
 
         queueObserver = queueState.$workspaces
             .receive(on: RunLoop.main)
@@ -44,7 +46,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentSize = NSSize(width: 320, height: 400)
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentViewController = NSHostingController(rootView: PopoverView(queueState: queueState))
+        popover.contentViewController = NSHostingController(
+            rootView: PopoverView(queueState: queueState, workspaceState: workspaceState)
+        )
     }
 
     func updateBadge(count: Int) {
@@ -133,16 +137,92 @@ class QueueState: ObservableObject {
     }
 }
 
+// MARK: - Workspace State
+
+struct WorkspaceInfo {
+    var apps: [String] = []
+    var agentStatus: String? = nil
+}
+
+@MainActor
+class WorkspaceState: ObservableObject {
+    @Published var workspaces: [String: WorkspaceInfo] = [:]
+    @Published var focused: String = ""
+
+    private var timer: Timer?
+    private let allWorkspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+    init() {
+        poll()
+        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+    }
+
+    func poll() {
+        if let focusedOutput = runAerospace(["list-workspaces", "--focused"]) {
+            focused = focusedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard let output = runAerospace(["list-windows", "--all", "--format", "%{window-id} %{workspace} %{app-name}"]) else { return }
+
+        var newMap: [String: WorkspaceInfo] = [:]
+        for ws in allWorkspaces { newMap[ws] = WorkspaceInfo() }
+
+        for line in output.components(separatedBy: "\n") where !line.isEmpty {
+            let parts = line.split(separator: " ", maxSplits: 2)
+            guard parts.count >= 3 else { continue }
+            let ws = String(parts[1])
+            let app = String(parts[2])
+            if newMap[ws] != nil { newMap[ws]!.apps.append(app) }
+        }
+
+        for ws in allWorkspaces {
+            if let existing = workspaces[ws] {
+                newMap[ws]?.agentStatus = existing.agentStatus
+            }
+        }
+
+        workspaces = newMap
+    }
+
+    func updateAgentStatus(workspace: String, status: String) {
+        if workspaces[workspace] != nil {
+            workspaces[workspace]!.agentStatus = status
+        }
+    }
+
+    nonisolated private func runAerospace(_ args: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/aerospace")
+        process.arguments = args
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+}
+
 // MARK: - Main Popover View
 
 struct PopoverView: View {
     @ObservedObject var queueState: QueueState
+    @ObservedObject var workspaceState: WorkspaceState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             QueueSection(workspaces: queueState.workspaces)
             Divider()
-            Text("Workspace grid and timeline coming soon.")
+            WorkspaceGrid(workspaces: workspaceState.workspaces, focused: workspaceState.focused)
+            Divider()
+            Text("Activity timeline coming next.")
                 .foregroundColor(.secondary)
                 .font(.caption)
                 .padding()
@@ -191,5 +271,84 @@ struct QueueSection: View {
                 .foregroundColor(.secondary)
         }
         .padding(12)
+    }
+}
+
+// MARK: - Workspace Grid
+
+struct WorkspaceGrid: View {
+    let workspaces: [String: WorkspaceInfo]
+    let focused: String
+    let allWorkspaces = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("WORKSPACES")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 4) {
+                ForEach(allWorkspaces, id: \.self) { ws in
+                    let info = workspaces[ws] ?? WorkspaceInfo()
+                    let isFocused = ws == focused
+                    WorkspaceCell(name: ws, info: info, isFocused: isFocused)
+                }
+            }
+
+            HStack(spacing: 12) {
+                LegendDot(color: .orange, label: "needs attention")
+                LegendDot(color: .blue, label: "working")
+                LegendDot(color: .green, label: "idle")
+                LegendDot(color: .purple, label: "focused")
+            }
+            .font(.system(size: 10))
+            .foregroundColor(.secondary)
+        }
+        .padding(12)
+    }
+}
+
+struct WorkspaceCell: View {
+    let name: String
+    let info: WorkspaceInfo
+    let isFocused: Bool
+
+    var borderColor: Color {
+        if isFocused { return .purple }
+        switch info.agentStatus {
+        case "needsAttention": return .orange
+        case "idle", "stopped": return .green
+        default:
+            return info.apps.isEmpty ? .clear : .blue
+        }
+    }
+
+    var bgColor: Color {
+        borderColor.opacity(borderColor == .clear ? 0 : 0.15)
+    }
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 11, weight: isFocused ? .bold : .regular, design: .monospaced))
+            .foregroundColor(borderColor == .clear ? .secondary.opacity(0.5) : borderColor)
+            .frame(width: 28, height: 28)
+            .background(bgColor)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(borderColor, lineWidth: borderColor == .clear ? 0 : 1.5)
+            )
+            .cornerRadius(4)
+    }
+}
+
+struct LegendDot: View {
+    let color: Color
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(label)
+        }
     }
 }
