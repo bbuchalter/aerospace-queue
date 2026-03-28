@@ -109,6 +109,9 @@ if [ "$last" != "$target_ws" ]; then
 else
   log "skipped duplicate"
 fi
+# Emit structured event for menu bar app
+events="${dir}/events.jsonl"
+printf '{"type":"push","workspace":"%s","timestamp":%d}\n' "$target_ws" "$(date +%s)" >> "$events"
 say "push $target_ws" &
 /usr/bin/afplay /System/Library/Sounds/Glass.aiff &
 log "done"

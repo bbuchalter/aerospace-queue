@@ -49,6 +49,9 @@ fi
 
 /opt/homebrew/bin/aerospace workspace "$first"
 log "switched to workspace $first"
+# Emit structured event for menu bar app
+events="${dir}/events.jsonl"
+printf '{"type":"pop","workspace":"%s","timestamp":%d}\n' "$first" "$(date +%s)" >> "$events"
 say "pop $first" &
 /usr/bin/afplay /System/Library/Sounds/Pop.aiff &
 log "done"
