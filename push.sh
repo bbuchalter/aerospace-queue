@@ -82,7 +82,7 @@ target_ws="$current_ws"
 if [ "$other_windows" -gt 0 ]; then
   occupied=$(/opt/homebrew/bin/aerospace list-windows --all --format '%{workspace}' | sort -u)
   log "occupied workspaces: $(echo $occupied | tr '\n' ' ')"
-  for candidate in 1 2 3 4 5 6 7 8 9 A B C D E F G I M N O P Q R S T U V W X Y Z; do
+  for candidate in 1 2 3 4 5 6 7 8 9; do
     if ! echo "$occupied" | grep -qx "$candidate"; then
       target_ws="$candidate"
       break
