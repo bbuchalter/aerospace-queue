@@ -47,7 +47,10 @@ aero_windows=$(/opt/homebrew/bin/aerospace list-windows --all --format '%{window
 log "aerospace windows:"
 log "$aero_windows"
 
-read -r window_id current_ws < <(
+# Use command substitution instead of `read < <(...)` — when AeroSpace returns
+# empty window titles the subshell produces no output, and `read` exits non-zero
+# which `set -e` treats as fatal (killing the script before the friendly guard).
+match=$(
   echo "$aero_windows" \
     | while IFS=' ' read -r wid ws title; do
         if [ "$title" = "$window_title" ]; then
@@ -56,6 +59,8 @@ read -r window_id current_ws < <(
         fi
       done
 )
+window_id="${match%% *}"
+current_ws="${match#* }"
 log "matched window_id=${window_id:-none} current_ws=${current_ws:-none}"
 
 if [ -z "${window_id:-}" ]; then
@@ -69,7 +74,15 @@ fi
 focused=$(/opt/homebrew/bin/aerospace list-workspaces --focused)
 log "focused=$focused current_ws=$current_ws"
 if [ "$focused" = "$current_ws" ]; then
-  log "already focused on this workspace, skipping"
+  terminal_count_here=$(/opt/homebrew/bin/aerospace list-windows --workspace "$current_ws" --format '%{app-name}' \
+    | grep -c 'iTerm2' || true)
+  if [ "$terminal_count_here" -gt 1 ]; then
+    log "already focused on workspace $current_ws with $terminal_count_here terminals, move Claude windows to different workspaces"
+    say "$terminal_count_here terminals on workspace $current_ws, move Claude windows to different workspaces" &
+  else
+    log "already focused on this workspace, skipping"
+  fi
+  /usr/bin/afplay /System/Library/Sounds/Glass.aiff &
   exit 0
 fi
 

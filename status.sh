@@ -45,7 +45,10 @@ fi
 # Match the window title to an aerospace window and its current workspace
 aero_windows=$(/opt/homebrew/bin/aerospace list-windows --all --format '%{window-id} %{workspace} %{window-title}')
 
-read -r window_id current_ws < <(
+# Use command substitution instead of `read < <(...)` — when AeroSpace returns
+# empty window titles the subshell produces no output, and `read` exits non-zero
+# which `set -e` treats as fatal (killing the script before the friendly guard).
+match=$(
   echo "$aero_windows" \
     | while IFS=' ' read -r wid ws title; do
         if [ "$title" = "$window_title" ]; then
@@ -54,6 +57,8 @@ read -r window_id current_ws < <(
         fi
       done
 )
+window_id="${match%% *}"
+current_ws="${match#* }"
 log "matched window_id=${window_id:-none} current_ws=${current_ws:-none}"
 
 if [ -z "${current_ws:-}" ]; then
