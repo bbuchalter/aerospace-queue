@@ -352,8 +352,19 @@ struct PopoverView: View {
             Divider()
             ActivityTimeline(events: eventLog.events)
             Spacer()
+            Divider()
+            HStack {
+                Spacer()
+                Button("Quit") {
+                    NSApp.terminate(nil)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .font(.system(size: 11))
+                .padding(8)
+            }
         }
-        .frame(width: 320, height: 400)
+        .frame(width: 320, height: 420)
     }
 }
 
